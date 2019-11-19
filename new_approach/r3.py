@@ -1,10 +1,11 @@
-from threading import Thread
+from threading import Thread, Lock
 import socket
 import struct
 import time
+
 # Node #2 , r1
 # This is router
-
+file_lock = Lock()
 endpoint = 'r3'
 interfaces = {
     #   node: (listen,      send)
@@ -40,7 +41,8 @@ buffer_size = 128
 message_count = 1000
 
 
-def listen_interface(interface):
+# other_endpoint s, r2
+def listen_interface(other_endpoint, interface):
     # I will be reciever
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     listen, receiver = interface
@@ -51,14 +53,21 @@ def listen_interface(interface):
     while True:
         try:
             recv_msg = sock.recv(buffer_size)
-            t, _ = parse_packet(recv_msg)
-            send_msg = acknowledge(ts=t)
+            ts, _ = parse_packet(recv_msg)
+            send_msg = acknowledge(ts=ts)
             sock.sendto(send_msg, (receiver, port))
-        except Exception as e:
-            print(e)
+        except:
             break
+    if other_endpoint is 's':
+        avg_rtt = sock.recv(buffer_size)  # receive avg_rtt values from s and d
+        avg_rtt = float(avg_rtt.decode())
+        file_lock.acquire()
+        with open('link_costs.txt', 'a') as file:
+            file.write(other_endpoint + "-" + endpoint + "=" + avg_rtt)  # s-r3=avg_rtt
+        file_lock.release()
 
 
+# other_endpoint d
 def link_interface(other_endpoint, interface):
     # I will be the sender
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
@@ -74,16 +83,17 @@ def link_interface(other_endpoint, interface):
     for _ in range(message_count):
         sock.sendto(create_packet(), (receiver, port))
         recv_msg = sock.recv(buffer_size)
-        t, msg = parse_packet(recv_msg)
-        assert msg == b'ack'
+        t, _ = parse_packet(recv_msg)
         rtts.append(time.time() - t)
-        #print(f'recieved msg: {msg}')
-    assert len(rtts) == message_count
+
     tot_rtt = 0
     for rtt in rtts:
         tot_rtt += rtt
     avg_rtt = tot_rtt / message_count
-    print(f'{endpoint}---{other_endpoint} -> {avg_rtt}')
+    file_lock.acquire()
+    with open('link_costs.txt', 'a') as file:
+        file.write(other_endpoint + "-" + endpoint + "=" + avg_rtt)  # d-r3=avg_rtt
+    file_lock.release()
 
 
 if __name__ == "__main__":
@@ -92,8 +102,8 @@ if __name__ == "__main__":
         t = Thread(target=link_interface, args=(node, interface))
         t.start()
         threads.append(t)
-    for _, interface in recieved_interfaces.items():
-        t = Thread(target=listen_interface, args=(interface, ))
+    for node, interface in recieved_interfaces.items():
+        t = Thread(target=listen_interface, args=(node, interface))
         t.start()
         threads.append(t)
 

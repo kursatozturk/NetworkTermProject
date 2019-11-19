@@ -31,7 +31,8 @@ buffer_size = 128
 message_count = 1000
 
 
-def listen_interface(interface):
+#   other_endpoints r1, r2, r3
+def listen_interface(other_endpoint, interface):
     # I will be reciever
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     listen, receiver = interface
@@ -50,10 +51,11 @@ def listen_interface(interface):
             break
 
 
+
 if __name__ == "__main__":
     threads = list()
-    for _, interface in recieved_interfaces.items():
-        t = Thread(target=listen_interface, args=(interface, ))
+    for node, interface in recieved_interfaces.items():
+        t = Thread(target=listen_interface, args=(node, interface))
         t.start()
         threads.append(t)
 
