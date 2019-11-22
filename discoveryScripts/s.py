@@ -8,6 +8,12 @@ import time
 
 # node spesific settings
 endpoint = 's'
+
+"""
+    Represents the links that used to send messages.
+    key holds the node that links connected to,
+    value holds a tuple containing two ip of two endpoint of the link.
+"""
 interfaces = {
     # node : (listen,    send)
     'r1': ('10.10.1.1', '10.10.1.2'),
@@ -64,9 +70,13 @@ def link_interface(other_endpoint: str, interface: Tuple[str, str]):
     # received byte is not important
     # not necessary to read what it is
     for _ in range(message_count):
+        # create a packet and send it to receiver
         sock.sendto(create_packet(), (receiver, port))
+        # wait for acknowledgement
         recv_msg = sock.recv(buffer_size)
+        # extract timestamp
         ts, _ = parse_packet(recv_msg)
+        # calculate rtt and store
         rtts.append(time.time() - ts)
 
     sock.recv(1)  # wait till other endpoint is ready to receive rtt
@@ -83,6 +93,7 @@ def link_interface(other_endpoint: str, interface: Tuple[str, str]):
 if __name__ == "__main__":
     threads = list()
     for node, interface in interfaces.items():
+        # open a thread for each link
         t = Thread(target=link_interface, args=(node, interface))
         t.start()
         threads.append(t)

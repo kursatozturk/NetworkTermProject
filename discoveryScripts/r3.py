@@ -7,15 +7,26 @@ import time
 # Node #4, r3
 # This is router
 
-file_lock: Lock = Lock()  # file lock to rule out writing rtts to file
+file_lock = Lock()  # file lock to rule out writing rtts to file
 
 # node spesific variables
 endpoint = 'r3'
+
+"""
+    Represents the links that used to send messages.
+    key holds the node that links connected to,
+    value holds a tuple containing two ip of two endpoint of the link.
+"""
 interfaces = {
     #   node: (listen,      send)
     'd': ('10.10.7.2', '10.10.7.1')
 }
 
+"""
+    Represents the links that used to receive mesesages.
+    key holds the node that links connected to,
+    value holds a tuple containing two ip of two endpoint of the link.
+"""
 recieved_interfaces = {
     #   node: (listen,      send)
     's': ('10.10.3.2', '10.10.3.1'),
@@ -62,23 +73,31 @@ def parse_packet(packet: bytes) -> Tuple[float, str]:
 #   other_endpoint s, r2
 def listen_interface(other_endpoint: str, interface: Tuple[str, str]):
     """
-        listens to the link's inner interface and sends acknowledgement to link's outer interface.
         @param other_endpoint: node that link is connected by outer interface.
         @interface: tuple containing inner and outer ip's of link.
         @return: None
+
+        listens to the link's inner interface and sends acknowledgement to link's outer interface.
     """
-    # I will be reciever
+
+    # socket to listen other endpoint
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     listen, receiver = interface
+
+    # bind socket to listen ip to receive packets
     sock.bind((listen, port))
-    sock.settimeout(5)
+
     # inform other endpoint that this endpoint opened
     sock.sendto(b'1', (receiver, port))
 
+
     for _ in range(message_count):
         recv_msg = sock.recv(buffer_size)
+        # extract timestamp from message
         ts, _ = parse_packet(recv_msg)
+        # put timestamp to acknowledgement message
         send_msg = acknowledge(ts=ts)
+        # send back to receiver interface
         sock.sendto(send_msg, (receiver, port))
 
     # if listening to s,
@@ -116,9 +135,13 @@ def link_interface(other_endpoint: str, interface: Tuple[str, str]):
     # recieved byte is not important
     # not necessary to read what it is
     for _ in range(message_count):
+        # create a packet and send it to receiver
         sock.sendto(create_packet(), (receiver, port))
+        # wait for acknowledgement
         recv_msg = sock.recv(buffer_size)
+        # extract timestamp
         ts, _ = parse_packet(recv_msg)
+        # calculate rtt and store
         rtts.append(time.time() - ts)
 
     tot_rtt = 0
@@ -134,10 +157,12 @@ def link_interface(other_endpoint: str, interface: Tuple[str, str]):
 if __name__ == "__main__":
     threads = list()
     for node, interface in interfaces.items():
+        # open a thread for each link
         t = Thread(target=link_interface, args=(node, interface))
         t.start()
         threads.append(t)
     for node, interface in recieved_interfaces.items():
+        # open a thread for each link
         t = Thread(target=listen_interface, args=(node, interface))
         t.start()
         threads.append(t)
