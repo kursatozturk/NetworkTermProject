@@ -1,5 +1,4 @@
 from socket import socket, AF_INET, SOCK_DGRAM
-from ipaddress import IPv4Address
 from threading import Timer, Thread, Lock
 from queue import Queue
 from typing import Callable, Optional
