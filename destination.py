@@ -5,16 +5,17 @@ from typing import Callable, Optional
 from functools import wraps
 from functools import reduce
 from sys import argv
+from os import _exit as exit
 
 UDP = lambda: socket(AF_INET, SOCK_DGRAM)
 
 PORT = 23150
 EXPERIMENT = 1
 
-WINDOW_SIZE = 128
+WINDOW_SIZE = 256
 MAX_PACK_SIZE = 1000
 HEADER_SIZE = 9
-TIMEOUT = .3
+TIMEOUT = 1
 PAYLOAD_SIZE = MAX_PACK_SIZE - HEADER_SIZE
 
 ACKNOWLEDGED_MESSAGE = b"ACKNOWLEDGED"
@@ -164,23 +165,29 @@ class DataPackManager:
         if packet.packet_number == 0:
             if self.metadata_acquired:
                 return
- 
+
             # metadata acquired
             self.metadata_acquired = True
-            print('metadata acquired')
             try:
-                packet_count = int.from_bytes(packet.payload, 'little')
-                print(packet_count)
+                packet_count = int.from_bytes(packet.payload, "little")
                 current_count = len(self.__container)
                 self.__container.extend([None] * (packet_count - current_count))
             except Exception as e:
-                print(f'received : -> {e!r}')
+                print(f"received : -> {e!r}")
 
-        self.__container[packet.packet_number] = packet.payload
+        if not self.__container[packet.packet_number]:
+            self.__container[packet.packet_number] = packet.payload
+
+    @property
+    def packets(self):
+        return {
+            idx: len(packet) if packet else 0 
+                for idx, packet in enumerate(self.__container)
+        }
 
     @property
     def remaining(self):
-        return next((True for _, x in enumerate(self.__container) if not x), False)
+        return next((True for x in self.__container if not x), False)
 
     @property
     def file(self):
@@ -193,7 +200,7 @@ class Ack(Packet):
     """
 
     def __init__(self, pack_num: int):
-        super().__init__(ACKNOWLEDGED_MESSAGE, pack_num)
+        super().__init__(data_chunk=ACKNOWLEDGED_MESSAGE, packet_number=pack_num)
 
 
 class Receiver:
@@ -227,7 +234,7 @@ class Receiver:
                 if pack == b"":
                     break
                 Receiver.received_packet_queue.put((pack, idx))
- 
+
             fin_counter = 0
             sock.settimeout(TIMEOUT)
             while fin_counter < 5:
@@ -236,12 +243,12 @@ class Receiver:
                 try:
                     fin_ack = sock.recv(MAX_PACK_SIZE)
                 except Exception as e:
-                    print(f'{e!r}')
                     fin_counter += 1
                     continue
-                if fin_ack == b'fin_ack':
+                if fin_ack == b"fin_ack":
                     break
-        exit()
+        exit(0)
+
     @staticmethod
     def listen_worker():
         """
@@ -259,18 +266,19 @@ class Receiver:
                         continue
                     if packet:
                         # packet is accepted
-                        Receiver.data_pack_manager.received(packet)
                         # return acknowledgement
                         ack_packet = Ack(packet.packet_number)
-                        receiver = Receiver.ack_receivers[idx]
                         # send acknowledgement to corresponding link
+                        receiver = Receiver.ack_receivers[idx]
                         sock.sendto(ack_packet.get(), (receiver, PORT))
+                        Receiver.data_pack_manager.received(packet)
+                    else:
+                        print('packet is invalid!!!1!!1!')
                 for sender in Receiver.senders:
                     # call listener to say we are going home
                     sock.sendto(b"", (sender, PORT))
             except Exception as e:
                 print(f" 233 => {e!r}")
-
 
 
 def conduct_experiment():
@@ -281,7 +289,8 @@ def conduct_experiment():
     listen_worker = Thread(target=Receiver.listen_worker)
     listen_worker.start()
     listeners = [
-        Thread(target=Receiver.listener, args=(idx,)) for idx, sender in enumerate(Receiver.senders)
+        Thread(target=Receiver.listener, args=(idx,))
+        for idx, sender in enumerate(Receiver.senders)
     ]
     for listener in listeners:
         listener.start()
@@ -307,8 +316,20 @@ if __name__ == "__main__":
     with open(f"output{experiment}", "wb") as f:
         f.write(Receiver.data_pack_manager.file)
     """
-    sudo tc qdisc change dev eth0 root netem loss 5% delay 3ms
-    sudo tc qdisc change dev eth1 root netem loss 5% delay 3ms
-    sudo tc qdisc change dev eth2 root netem loss 5% delay 3ms
-    sudo tc qdisc change dev eth3 root netem loss 5% delay 3ms
+sudo tc qdisc change dev eth1 root netem loss 5% delay 3ms
+sudo tc qdisc change dev eth2 root netem loss 5% delay 3ms
+sudo tc qdisc change dev eth3 root netem loss 5% delay 3ms
+sudo tc qdisc change dev eth4 root netem loss 5% delay 3ms
+
+
+sudo tc qdisc change dev eth1 root netem loss 15% delay 3ms
+sudo tc qdisc change dev eth2 root netem loss 15% delay 3ms
+sudo tc qdisc change dev eth3 root netem loss 15% delay 3ms
+sudo tc qdisc change dev eth4 root netem loss 15% delay 3ms
+
+
+sudo tc qdisc change dev eth1 root netem loss 38% delay 3ms
+sudo tc qdisc change dev eth2 root netem loss 38% delay 3ms
+sudo tc qdisc change dev eth3 root netem loss 38% delay 3ms
+sudo tc qdisc change dev eth4 root netem loss 38% delay 3ms
     """

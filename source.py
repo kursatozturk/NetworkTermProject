@@ -1,3 +1,4 @@
+#! usr/bin/python3
 from socket import socket, AF_INET, SOCK_DGRAM
 from ipaddress import IPv4Address
 from threading import Timer, Thread, Lock
@@ -5,23 +6,31 @@ from queue import Queue
 from typing import Callable, Optional, List
 from functools import wraps
 from sys import argv
+from os import _exit
 from functools import reduce
+from time import time
+
+t = time()
+
+def die(status):
+    print(time() - t)
+    _exit(status)
 
 UDP = lambda: socket(AF_INET, SOCK_DGRAM)
 
 PORT = 23150
 
-TIMEOUT = 0.3
+TIMEOUT = 0.15
 
 MAX_PACK_SIZE = 1000
 HEADER_SIZE = 9
 PAYLOAD_SIZE = MAX_PACK_SIZE - HEADER_SIZE
 
-WINDOW_SIZE = 128
+WINDOW_SIZE = 256
 EXPERIMENT = 1
 
 WHOAMI = "source"
-FILE_PATH = './input.txt'
+FILE_PATH = "./input.txt"
 
 
 class Topology(type):
@@ -164,7 +173,7 @@ class Packet:
         data = pack[HEADER_SIZE:]
         packet = cls(data, pack_num)
         if packet.check_checksum(checksum):
-            return pack_num
+            return packet
         else:
             return None
 
@@ -221,7 +230,7 @@ class DataPackManager:
         """
             Returns count of remaining packets. i.e. not yet acknowledged.
         """
-        return next((True for idx, x in enumerate(self.__container) if x), False)
+        return next((True for x in self.__container if x), False)
 
     @property
     def window_index(self) -> int:
@@ -236,18 +245,24 @@ class DataPackManager:
     @property
     def window_sent(self) -> bool:
         """
-            returns if current window is fully sent and checked
+            returns if current window is fully sent and acknowledged
         """
         window_index = self.__window_index
+        sent = True
+        for x in self.packets[window_index: window_index + WINDOW_SIZE]:
+            sent = sent and (not x)
+        return sent
+        """
         return reduce(
             lambda x, y: x and not y,
             self.packets[window_index : window_index + WINDOW_SIZE],
             True,
         )
-    
+        """
+
     def add_metadata(self):
         packet_count = len(self.__container) + 1
-        packet_count_as_bytes = packet_count.to_bytes(8, 'little')
+        packet_count_as_bytes = packet_count.to_bytes(8, "little")
         metadata_pack = Packet(payload=packet_count_as_bytes, packet_number=0)
         self.__container.insert(0, metadata_pack)
 
@@ -255,9 +270,6 @@ class DataPackManager:
         """
             deletes acknowledged packet from cache
         """
-        if pack_num == -1:
-            print("Meta data acknowledgement should've not been come to here")
-            return
         self.__container[pack_num] = None
 
     def get(self, pack_num: int) -> Optional[Packet]:
@@ -270,7 +282,6 @@ class DataPackManager:
             )
             return None
         return self.__container[pack_num]
-
 
 
 class Sender:
@@ -313,8 +324,6 @@ class Sender:
                 packet = Packet(data_chunk, pack_num + 1)
                 Sender.pack_manager.add_packet(packet)
         Sender.pack_manager.add_metadata()
-        
-
 
     @staticmethod
     def send_data(idx: int):
@@ -323,17 +332,17 @@ class Sender:
             Sends data to router links specified in Sender.receivers
         """
         # acquire lock to block in first acquire
-        # Sender.window_lock.acquire()
         receiver = Sender.receivers[idx]
         with UDP() as sock:
             # send metadata to destination
             # so it alloctes memory for upcoming file
+
+            Sender.window_lock[idx].acquire()
             packets = Sender.pack_manager.packets
             while Sender.pack_manager.remaining:
-                Sender.window_lock[idx].acquire()
                 first_packet = Sender.pack_manager.window_index
                 last_packet = first_packet + WINDOW_SIZE
-                print(f"sending packets: [{first_packet}, {last_packet}]")
+                print(f'sending window: [{first_packet}:{last_packet}]')
                 for packet in packets[first_packet:last_packet]:
                     sock.sendto(packet.get(), (receiver, PORT))
 
@@ -341,8 +350,10 @@ class Sender:
                         Sender.resend_pack,
                         timeout=TIMEOUT,
                         pack_num=packet.packet_number,
-                        idx=idx
+                        idx=idx,
                     )
+                
+                Sender.window_lock[idx].acquire()
         # inform resend thread that we are going home
         Sender.resend_queue.put(None)
 
@@ -364,7 +375,6 @@ class Sender:
                 if packet == b"":
                     break
                 Sender.ack_queue.put(packet)
-        print("Acknowledgement listening exitting")
 
     @staticmethod
     def listen_worker():
@@ -376,15 +386,15 @@ class Sender:
             # get packet from queue
             pack = Sender.ack_queue.get()
             # resolve it
-            pack_num = Packet.resolve(pack)
-            if pack_num is not None:
+            packet = Packet.resolve(pack)
+            if packet is not None:
                 # if it is valid, acknowledge it
-                if pack_num == -1:
+                if packet.packet_number == -1:
                     with UDP() as sock:
                         for ack_listener in Sender.ack_listeners:
                             sock.sendto(b"fin_ack", (ack_listener, PORT))
-                        exit()
-                Sender.pack_manager.acknowledged(pack_num)
+                        die(0)
+                Sender.pack_manager.acknowledged(packet.packet_number)
                 if Sender.pack_manager.window_sent:
                     # if window is sent, slide window
                     Sender.pack_manager.next_window()
@@ -393,19 +403,12 @@ class Sender:
                         try:
                             lock.release()
                         except Exception as e:
-                            print('lock cannot released.')
-                    #Sender.window_lock.release()
-
+                            print("lock cannot released.")
 
                 if not Sender.pack_manager.remaining:
                     # if all packets are sent, terminate safely.
-                    with UDP() as sock:
-                        print("Sending empty message to ack listen thread.")
-                        for ack_listener in Sender.ack_listeners:
-                            sock.sendto(b"", (ack_listener, PORT))
                     break
-
-        print("Listen Worker exits")
+        die(0)
 
     @staticmethod
     def resend_worker():
@@ -420,11 +423,15 @@ class Sender:
                     # stop signal
                     break
                 packet, idx = pack
-                receiver = Sender.receivers[(idx + 1) % EXPERIMENT]
+                n_idx = (idx + 1) % EXPERIMENT
+                receiver = Sender.receivers[n_idx]
                 sock.sendto(packet.get(), (receiver, PORT))
                 # set timeout again
                 set_timeout(
-                    Sender.resend_pack, timeout=TIMEOUT, pack_num=packet.packet_number, idx=idx
+                    Sender.resend_pack,
+                    timeout=TIMEOUT,
+                    pack_num=packet.packet_number,
+                    idx=n_idx,
                 )
 
 
@@ -447,9 +454,10 @@ def conduct_experiment():
         listen_ack_thread.start()
     resend_worker_thread = Thread(target=Sender.resend_worker)
     resend_worker_thread.start()
-    send_threads = [ Thread(target=Sender.send_data, args=(idx, ))
-                    for idx, _ in enumerate(Sender.receivers)
-                ] 
+    send_threads = [
+        Thread(target=Sender.send_data, args=(idx,))
+        for idx, _ in enumerate(Sender.receivers)
+    ]
     for send_thread in send_threads:
         send_thread.start()
 
@@ -487,4 +495,6 @@ if __name__ == "__main__":
         experiment2_settings()
     else:
         raise ValueError("Experiment must be either 1, 2 or not preset")
+
     conduct_experiment()
+
