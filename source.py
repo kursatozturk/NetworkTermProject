@@ -17,9 +17,11 @@ MAX_PACK_SIZE = 1000
 HEADER_SIZE = 9
 PAYLOAD_SIZE = MAX_PACK_SIZE - HEADER_SIZE
 
-WINDOW_SIZE = 32
+WINDOW_SIZE = 128
+EXPERIMENT = 1
 
 WHOAMI = "source"
+FILE_PATH = './input.txt'
 
 
 class Topology(type):
@@ -215,12 +217,11 @@ class DataPackManager:
         return self.__container
 
     @property
-    def remaining(self) -> int:
+    def remaining(self) -> bool:
         """
             Returns count of remaining packets. i.e. not yet acknowledged.
         """
-        remaining = sum(x is not None for x in self.packets)
-        return remaining
+        return next((True for idx, x in enumerate(self.__container) if x), False)
 
     @property
     def window_index(self) -> int:
@@ -243,6 +244,12 @@ class DataPackManager:
             self.packets[window_index : window_index + WINDOW_SIZE],
             True,
         )
+    
+    def add_metadata(self):
+        packet_count = len(self.__container) + 1
+        packet_count_as_bytes = packet_count.to_bytes(8, 'little')
+        metadata_pack = Packet(payload=packet_count_as_bytes, packet_number=0)
+        self.__container.insert(0, metadata_pack)
 
     def acknowledged(self, pack_num: int):
         """
@@ -265,6 +272,7 @@ class DataPackManager:
         return self.__container[pack_num]
 
 
+
 class Sender:
     """
         Threading Manager
@@ -280,87 +288,69 @@ class Sender:
     pack_manager = DataPackManager()
 
     # Lock object for window sliding.
-    window_lock = Lock()
+    window_lock = list()
 
     # Lock to be used in metadata sending
     metadata_lock = Lock()
 
     # set of receivers
     # will be fed in main thread according to command line parameters
-    receivers = set()
+    receivers = list()
 
     # set of acknowledgement listener interface
     # will be fed in main thread according to command line parameters
-    ack_listeners = set()
+    ack_listeners = list()
 
     @staticmethod
-    def send_data(file_path: str = "./input.txt"):
-        """
-            Thread entry function for sending data.
-            Sends data to router links specified in Sender.receivers
-        """
-        # acquire lock to block in first acquire
-        # Sender.window_lock.acquire()
-
-        with open(file_path, "rb") as f:
+    def read_file():
+        with open(FILE_PATH, "rb") as f:
             while True:
                 data_chunk = f.read(PAYLOAD_SIZE)
                 if not data_chunk:
                     break
 
                 pack_num = Sender.pack_manager.packet_count
-                packet = Packet(data_chunk, pack_num)
+                packet = Packet(data_chunk, pack_num + 1)
                 Sender.pack_manager.add_packet(packet)
+        Sender.pack_manager.add_metadata()
+        
+
+
+    @staticmethod
+    def send_data(idx: int):
+        """
+            Thread entry function for sending data.
+            Sends data to router links specified in Sender.receivers
+        """
+        # acquire lock to block in first acquire
+        # Sender.window_lock.acquire()
+        receiver = Sender.receivers[idx]
         with UDP() as sock:
             # send metadata to destination
             # so it alloctes memory for upcoming file
-            print("acquires metadata_lock")
-            Sender.metadata_lock.acquire()
-            while True:
-
-                for receiver in Sender.receivers:
-                    sock.sendto(
-                        Sender.pack_manager.packet_count.to_bytes(8, "little"),
-                        (receiver, PORT),
-                    )
-                try:
-                    print("acquire to exit")
-                    Sender.metadata_lock.acquire(timeout=TIMEOUT)
-                    break
-                except TimeoutError:
-                    print("TimeOut. Resending metadata")
-                    # resend metadata again
-                    pass
-                except Exception as e:
-                    print(e)
-                    pass
-
             packets = Sender.pack_manager.packets
             while Sender.pack_manager.remaining:
-                Sender.window_lock.acquire()
+                Sender.window_lock[idx].acquire()
                 first_packet = Sender.pack_manager.window_index
                 last_packet = first_packet + WINDOW_SIZE
                 print(f"sending packets: [{first_packet}, {last_packet}]")
                 for packet in packets[first_packet:last_packet]:
-                    for receiver in Sender.receivers:
-                        """
-                            Ack for metadata may be causing last element to be zero,
-                        """
-                        sock.sendto(packet.get(), (receiver, PORT))
+                    sock.sendto(packet.get(), (receiver, PORT))
 
                     set_timeout(
                         Sender.resend_pack,
                         timeout=TIMEOUT,
                         pack_num=packet.packet_number,
+                        idx=idx
                     )
         # inform resend thread that we are going home
         Sender.resend_queue.put(None)
 
     @staticmethod
-    def resend_pack(pack_num: int):
+    def resend_pack(pack_num: int, idx: int):
         packet = Sender.pack_manager.get(pack_num)
         if packet:
-            Sender.resend_queue.put(packet)
+            Sender.resend_queue.put((packet, idx))
 
     @staticmethod
     def listen_ack(listen_interface: str):
@@ -381,12 +371,7 @@ class Sender:
         """
             Will work till None put to ack_queue
         """
-        metadata = None
-        while metadata != -1:
-            metadata_ack = Sender.ack_queue.get()
-            metadata = Packet.resolve(metadata_ack)
-            print("metadata must be acknowledged")
-        Sender.metadata_lock.release()
+
         while True:
             # get packet from queue
             pack = Sender.ack_queue.get()
@@ -394,12 +379,23 @@ class Sender:
             pack_num = Packet.resolve(pack)
             if pack_num is not None:
                 # if it is valid, acknowledge it
+                if pack_num == -1:
+                    with UDP() as sock:
+                        for ack_listener in Sender.ack_listeners:
+                            sock.sendto(b"fin_ack", (ack_listener, PORT))
+                        exit()
                 Sender.pack_manager.acknowledged(pack_num)
                 if Sender.pack_manager.window_sent:
                     # if window is sent, slide window
                     Sender.pack_manager.next_window()
                     # inform sender thread that window is slided
-                    Sender.window_lock.release()
+                    for lock in Sender.window_lock:
+                        try:
+                            lock.release()
+                        except Exception as e:
+                            print('lock cannot released.')
+                    #Sender.window_lock.release()
+
 
                 if not Sender.pack_manager.remaining:
                     # if all packets are sent, terminate safely.
@@ -419,16 +415,16 @@ class Sender:
         with UDP() as sock:
             while True:
                 # get packet from queue
-                packet: Packet = Sender.resend_queue.get()
-                if packet is None:
+                pack = Sender.resend_queue.get()
+                if pack is None:
                     # stop signal
                     break
-                for receiver in Sender.receivers:
-                    # send to all available links
-                    sock.sendto(packet.get(), (receiver, PORT))
+                packet, idx = pack
+                receiver = Sender.receivers[(idx + 1) % EXPERIMENT]
+                sock.sendto(packet.get(), (receiver, PORT))
                 # set timeout again
                 set_timeout(
-                    Sender.resend_pack, timeout=TIMEOUT, pack_num=packet.packet_number
+                    Sender.resend_pack, timeout=TIMEOUT, pack_num=packet.packet_number, idx=idx
                 )
 
 
@@ -438,6 +434,8 @@ def conduct_experiment():
     """
     assert Sender.receivers
     assert Sender.ack_listeners
+    Sender.read_file()
+    Sender.window_lock = [Lock() for _ in Sender.receivers]
 
     listen_ack_threads = [
         Thread(target=Sender.listen_ack, args=(listener,))
@@ -449,28 +447,32 @@ def conduct_experiment():
         listen_ack_thread.start()
     resend_worker_thread = Thread(target=Sender.resend_worker)
     resend_worker_thread.start()
-    send_thread = Thread(target=Sender.send_data)
-    send_thread.start()
+    send_threads = [ Thread(target=Sender.send_data, args=(idx, ))
+                    for idx, _ in enumerate(Sender.receivers)
+                ] 
+    for send_thread in send_threads:
+        send_thread.start()
+
     for t in [
         *listen_ack_threads,
         listen_worker_thread,
         resend_worker_thread,
-        send_thread,
+        *send_threads,
     ]:
         t.join()
 
 
 def experiment1_settings():
-    Sender.receivers = {Interfaces.send_router3}
-    Sender.ack_listeners = {Interfaces.listen_router3}
+    Sender.receivers = [Interfaces.send_router3]
+    Sender.ack_listeners = [Interfaces.listen_router3]
 
 
 def experiment2_settings():
-    Sender.receivers = {Interfaces.send_router2, Interfaces.send_router1}
-    Sender.ack_listeners = {
+    Sender.receivers = [Interfaces.send_router2, Interfaces.send_router1]
+    Sender.ack_listeners = [
         Interfaces.listen_router2,
         Interfaces.listen_router1,
-    }
+    ]
 
 
 if __name__ == "__main__":
@@ -478,6 +480,7 @@ if __name__ == "__main__":
         experiment = 1
     else:
         experiment = argv[1]
+    EXPERIMENT = int(experiment)
     if experiment == "1":
         experiment1_settings()
     elif experiment == "2":

@@ -9,10 +9,12 @@ from sys import argv
 UDP = lambda: socket(AF_INET, SOCK_DGRAM)
 
 PORT = 23150
+EXPERIMENT = 1
 
-
+WINDOW_SIZE = 128
 MAX_PACK_SIZE = 1000
 HEADER_SIZE = 9
+TIMEOUT = .3
 PAYLOAD_SIZE = MAX_PACK_SIZE - HEADER_SIZE
 
 ACKNOWLEDGED_MESSAGE = b"ACKNOWLEDGED"
@@ -152,24 +154,37 @@ class DataPackManager:
     """
 
     def __init__(self):
-        self.__container = []
+        self.metadata_acquired = False
+        self.__container = [None] * WINDOW_SIZE
 
     def allocate(self, packet_count: int):
         self.__container = [None for i in range(packet_count)]
 
     def received(self, packet: Packet):
+        if packet.packet_number == 0:
+            if self.metadata_acquired:
+                return
+ 
+            # metadata acquired
+            self.metadata_acquired = True
+            print('metadata acquired')
+            try:
+                packet_count = int.from_bytes(packet.payload, 'little')
+                print(packet_count)
+                current_count = len(self.__container)
+                self.__container.extend([None] * (packet_count - current_count))
+            except Exception as e:
+                print(f'received : -> {e!r}')
+
         self.__container[packet.packet_number] = packet.payload
 
     @property
     def remaining(self):
-        remaining = (
-            sum(x is None for x in self.__container) if self.__container else True
-        )
-        return remaining
+        return next((True for _, x in enumerate(self.__container) if not x), False)
 
     @property
     def file(self):
-        return b"".join(self.__container)
+        return b"".join(self.__container[1:])
 
 
 class Ack(Packet):
@@ -193,35 +208,40 @@ class Receiver:
     data_pack_manager = DataPackManager()
 
     # Interfaces that it should listen
-    senders = set()
+    senders = list()
     # Interface that it should send acknowledgement
-    ack_receivers = set()
+    ack_receivers = list()
 
     @staticmethod
-    def listener(interface: str):
+    def listener(idx: int):
         """
             Listens socket and puts incoming packets to buffer(queue) 
         """
+        interface = Receiver.senders[idx]
+        fin = Packet(b"FINISHED", packet_number=-1)
         with UDP() as sock:
 
             sock.bind((interface, PORT))
-            try:
-                # metadata received
-                packet_count = sock.recv(8)
-                packet_count = int.from_bytes(packet_count, "little")
-                Receiver.data_pack_manager.allocate(packet_count)
-                meta_ack = Ack(-1)
-                for receiver in Receiver.ack_receivers:
-                    sock.sendto(meta_ack.get(), (receiver, PORT))
-            except Exception as e:
-                print(f"206 => {e!r}")
-                exit()
             while True:
                 pack = sock.recv(MAX_PACK_SIZE)
                 if pack == b"":
                     break
-                Receiver.received_packet_queue.put(pack)
-
+                Receiver.received_packet_queue.put((pack, idx))
+ 
+            fin_counter = 0
+            sock.settimeout(TIMEOUT)
+            while fin_counter < 5:
+                for receiver in Receiver.ack_receivers:
+                    sock.sendto(fin.get(), (receiver, PORT))
+                try:
+                    fin_ack = sock.recv(MAX_PACK_SIZE)
+                except Exception as e:
+                    print(f'{e!r}')
+                    fin_counter += 1
+                    continue
+                if fin_ack == b'fin_ack':
+                    break
+        exit()
     @staticmethod
     def listen_worker():
         """
@@ -231,7 +251,7 @@ class Receiver:
             try:
                 while Receiver.data_pack_manager.remaining:
                     # as long as missing packets remains
-                    packet = Receiver.received_packet_queue.get()
+                    packet, idx = Receiver.received_packet_queue.get()
                     try:
                         packet = Packet.resolve(packet)
                     except Exception as e:
@@ -242,14 +262,15 @@ class Receiver:
                         Receiver.data_pack_manager.received(packet)
                         # return acknowledgement
                         ack_packet = Ack(packet.packet_number)
-                        for receiver in Receiver.ack_receivers:
-                            # send acknowledgement to each link
-                            sock.sendto(ack_packet.get(), (receiver, PORT))
+                        receiver = Receiver.ack_receivers[idx]
+                        # send acknowledgement to corresponding link
+                        sock.sendto(ack_packet.get(), (receiver, PORT))
                 for sender in Receiver.senders:
                     # call listener to say we are going home
                     sock.sendto(b"", (sender, PORT))
             except Exception as e:
                 print(f" 233 => {e!r}")
+
 
 
 def conduct_experiment():
@@ -260,7 +281,7 @@ def conduct_experiment():
     listen_worker = Thread(target=Receiver.listen_worker)
     listen_worker.start()
     listeners = [
-        Thread(target=Receiver.listener, args=(sender,)) for sender in Receiver.senders
+        Thread(target=Receiver.listener, args=(idx,)) for idx, sender in enumerate(Receiver.senders)
     ]
     for listener in listeners:
         listener.start()
@@ -275,14 +296,19 @@ if __name__ == "__main__":
         experiment = 1
     else:
         experiment = argv[1]
-
+    EXPERIMENT = int(experiment)
     if experiment == "1":
-        Receiver.senders = {Interfaces.listen_router3}
-        Receiver.ack_receivers = {Interfaces.send_router3}
+        Receiver.senders = [Interfaces.listen_router3]
+        Receiver.ack_receivers = [Interfaces.send_router3]
     elif experiment == "2":
-        Receiver.senders = {Interfaces.listen_router2, Interfaces.listen_router1}
-        Receiver.ack_receivers = {Interfaces.send_router2, Interfaces.send_router1}
+        Receiver.senders = [Interfaces.listen_router2, Interfaces.listen_router1]
+        Receiver.ack_receivers = [Interfaces.send_router2, Interfaces.send_router1]
     conduct_experiment()
     with open(f"output{experiment}", "wb") as f:
         f.write(Receiver.data_pack_manager.file)
-
+    """
+    sudo tc qdisc change dev eth0 root netem loss 5% delay 3ms
+    sudo tc qdisc change dev eth1 root netem loss 5% delay 3ms
+    sudo tc qdisc change dev eth2 root netem loss 5% delay 3ms
+    sudo tc qdisc change dev eth3 root netem loss 5% delay 3ms
+    """
