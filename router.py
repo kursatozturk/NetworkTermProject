@@ -71,7 +71,7 @@ MAX_PACK_SIZE = 1000
 
 class Router:
     """
-        Routing handler
+        Routing handler. All thread functions are implemented in this class.
     """
 
     # packet buffer

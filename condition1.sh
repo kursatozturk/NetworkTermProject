@@ -1,0 +1,4 @@
+sudo tc qdisc change dev eth1 root netem loss 5% delay 3ms
+sudo tc qdisc change dev eth2 root netem loss 5% delay 3ms
+sudo tc qdisc change dev eth3 root netem loss 5% delay 3ms
+sudo tc qdisc change dev eth4 root netem loss 5% delay 3ms

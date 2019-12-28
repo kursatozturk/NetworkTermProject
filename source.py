@@ -34,7 +34,15 @@ FILE_PATH = "./input.txt"
 
 
 class Topology(type):
-
+    """
+        Topology class used in each node.
+        Used python metaprogramming. 
+        It returns corresponding ip according to WHOAMI variable
+            and accessed attribute.
+            i.e. if WHOMAI='source' and send_router3 is accessed
+                then what is requested is the r3 interface of the link
+                between s and r3. Returns router3_source
+    """
     router3_destination = "10.10.7.2"
     router2_destination = "10.10.5.1"
     router1_destination = "10.10.4.1"

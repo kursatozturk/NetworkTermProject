@@ -1,7 +1,7 @@
 # Ceng435 - Term Project 2
 ## Who we are?
-##### Beste Burhan 2171395
-##### Kürşat Öztürk 2171874
+- Beste Burhan 2171395
+- Kürşat Öztürk 2171874
 
 ### Data Communication and Networking
 
@@ -33,7 +33,9 @@
     ```bash
     tc qdisc change dev [INTERFACE] root netem loss 38% delay 3ms 
     ```
+    put eth1, eth2 and eth3 in [INTERFACE] and run the command for every node to add delay and losses to all links. In addition, in r2 node, you should add eth4 too.
 
+    i.e. ```tc qdisc change dev eth1 root netem loss 15% delay 3ms``` 
 - **1.4** Now we are ready to deliver file. Run scripts by ensuring s is the last one that starts running.
 - - in s node
     ```bash

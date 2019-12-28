@@ -1,7 +1,7 @@
 from socket import socket, AF_INET, SOCK_DGRAM
 from threading import Timer, Thread, Lock
 from queue import Queue
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from functools import wraps
 from functools import reduce
 from sys import argv
@@ -25,7 +25,15 @@ WHOAMI = "destination"
 
 
 class Topology(type):
-
+    """
+        Topology class used in each node.
+        Used python metaprogramming. 
+        It returns corresponding ip according to WHOAMI variable
+            and accessed attribute.
+            i.e. if WHOMAI='source' and send_router3 is accessed
+                then what is requested is the r3 interface of the link
+                between s and r3. Returns router3_source
+    """
     router3_destination = "10.10.7.2"
     router2_destination = "10.10.5.1"
     router1_destination = "10.10.4.1"
@@ -82,10 +90,16 @@ class Header:
         return self.__h.encode("utf-8")
 
     def size(self):
+        """
+            size of header. must be equal to HEADER_SIZE
+        """
         return self.__s
 
     @classmethod
-    def resolve(cls, pack: bytes):
+    def resolve(cls, pack: bytes)->Tuple[int, int]:
+        """
+            resolves packet number and checksum from bytes object
+        """
         header = pack.decode()
         pack_num, checksum = header.split(",")
         return int(pack_num), int(checksum)
@@ -101,12 +115,18 @@ class Packet:
     """
 
     def __init__(self, data_chunk: bytes, packet_number: int):
-
+        """
+            initiate packet
+        """
         self.packet_number = packet_number
         self.payload = data_chunk
         self.__header = Header(self.calc_checksum(self.payload), self.packet_number)
 
-    def get(self):
+    def get(self) -> bytes:
+        """
+            returns the packet ready for sending.
+            return type: bytes
+        """
 
         data_size = len(self.payload)
         assert (
@@ -116,10 +136,15 @@ class Packet:
 
     @staticmethod
     def calc_checksum(data_chunk: bytes):
+        """
+            calculates checksum
+        """
         return f"{(-(sum(data_chunk) % 256) & 0xFF):2x}"
 
     def check_checksum(self, checksum: int):
-
+        """
+            calculates checksum and compare it with the given one.
+        """
         pack_checksum = Packet.calc_checksum(self.payload)
         return int(pack_checksum, 16) == checksum
 
@@ -163,6 +188,7 @@ class DataPackManager:
 
     def received(self, packet: Packet):
         if packet.packet_number == 0:
+            # metadata is acquired
             if self.metadata_acquired:
                 return
 
@@ -179,14 +205,8 @@ class DataPackManager:
             self.__container[packet.packet_number] = packet.payload
 
     @property
-    def packets(self):
-        return {
-            idx: len(packet) if packet else 0 
-                for idx, packet in enumerate(self.__container)
-        }
-
-    @property
     def remaining(self):
+        # returns if any missing packet remains.
         return next((True for x in self.__container if not x), False)
 
     @property
@@ -235,9 +255,11 @@ class Receiver:
                     break
                 Receiver.received_packet_queue.put((pack, idx))
 
+            # inform source by sending FIN
             fin_counter = 0
             sock.settimeout(TIMEOUT)
             while fin_counter < 5:
+                # fin_ack may be dropped, try again. But not more than 5.
                 for receiver in Receiver.ack_receivers:
                     sock.sendto(fin.get(), (receiver, PORT))
                 try:
@@ -315,21 +337,3 @@ if __name__ == "__main__":
     conduct_experiment()
     with open(f"output{experiment}", "wb") as f:
         f.write(Receiver.data_pack_manager.file)
-    """
-sudo tc qdisc change dev eth1 root netem loss 5% delay 3ms
-sudo tc qdisc change dev eth2 root netem loss 5% delay 3ms
-sudo tc qdisc change dev eth3 root netem loss 5% delay 3ms
-sudo tc qdisc change dev eth4 root netem loss 5% delay 3ms
-
-
-sudo tc qdisc change dev eth1 root netem loss 15% delay 3ms
-sudo tc qdisc change dev eth2 root netem loss 15% delay 3ms
-sudo tc qdisc change dev eth3 root netem loss 15% delay 3ms
-sudo tc qdisc change dev eth4 root netem loss 15% delay 3ms
-
-
-sudo tc qdisc change dev eth1 root netem loss 38% delay 3ms
-sudo tc qdisc change dev eth2 root netem loss 38% delay 3ms
-sudo tc qdisc change dev eth3 root netem loss 38% delay 3ms
-sudo tc qdisc change dev eth4 root netem loss 38% delay 3ms
-    """
